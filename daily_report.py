@@ -5,6 +5,7 @@ Bugün gelen tüm siparişleri çeker, ürün bazında özetler ve Telegram'a g�
 
 import base64
 import requests
+import pytz
 from dotenv import load_dotenv
 load_dotenv()
 from datetime import datetime, time
@@ -25,11 +26,14 @@ def _get_headers() -> dict:
     }
 
 
+TURKEY_TZ = pytz.timezone("Europe/Istanbul")
+
+
 def get_today_range_ms() -> tuple:
-    """Bugünün 00:00 - 23:59 aralığını epoch milliseconds olarak döner."""
-    today = datetime.now().date()
-    start = datetime.combine(today, time.min)   # 00:00:00
-    end   = datetime.combine(today, time.max)   # 23:59:59
+    """Bugünün 00:00 - 23:59 aralığını Türkiye saatiyle epoch milliseconds olarak döner."""
+    today = datetime.now(TURKEY_TZ).date()
+    start = TURKEY_TZ.localize(datetime.combine(today, time.min))
+    end   = TURKEY_TZ.localize(datetime.combine(today, time.max))
     start_ms = int(start.timestamp() * 1000)
     end_ms   = int(end.timestamp()   * 1000)
     return start_ms, end_ms
@@ -72,7 +76,7 @@ def fetch_all_orders_today() -> list:
 
 def build_report(orders: list) -> str:
     """Sipariş listesinden Telegram mesajı oluşturur."""
-    today_str = datetime.now().strftime("%d.%m.%Y")
+    today_str = datetime.now(TURKEY_TZ).strftime("%d.%m.%Y")
 
     if not orders:
         return (
@@ -153,7 +157,7 @@ def build_report(orders: list) -> str:
         f"{'━' * 30}\n"
         f"📱 <b>Sipariş Kaynakları:</b>\n{app_text}"
         f"{'━' * 30}\n"
-        f"🕙 <i>Rapor saati: {datetime.now().strftime('%H:%M')}</i>"
+        f"🕙 <i>Rapor saati: {datetime.now(TURKEY_TZ).strftime('%H:%M')} (TR)</i>"
     )
 
     return message

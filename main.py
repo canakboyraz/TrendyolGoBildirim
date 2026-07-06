@@ -9,6 +9,7 @@ import time
 import signal
 import sys
 from datetime import datetime
+import pytz
 from dotenv import load_dotenv
 load_dotenv()  # .env dosyasını yükle (local geliştirme için)
 
@@ -38,9 +39,9 @@ def handle_shutdown(signum, frame):
 
 
 def check_daily_report():
-    """Her gün 23:45'te bir kez günlük rapor gönderir."""
+    """Her gün 23:45'te bir kez günlük rapor gönderir (Türkiye saati)."""
     global daily_report_sent_date
-    now_dt = datetime.now()
+    now_dt = datetime.now(TURKEY_TZ)
     today_str = now_dt.strftime("%Y-%m-%d")
 
     if (
@@ -80,8 +81,10 @@ def check_and_notify():
         print(f"[{now()}] 🔍 Yeni sipariş yok. (Toplam takip edilen: {len(seen_order_ids)})")
 
 
+TURKEY_TZ = pytz.timezone("Europe/Istanbul")
+
 def now() -> str:
-    return datetime.now().strftime("%H:%M:%S")
+    return datetime.now(TURKEY_TZ).strftime("%H:%M:%S")
 
 
 def startup_check() -> bool:
