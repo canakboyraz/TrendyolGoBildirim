@@ -1,0 +1,17 @@
+# Gizli bilgiler — asla GitHub'a gitmesin
+.env
+config.py
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
