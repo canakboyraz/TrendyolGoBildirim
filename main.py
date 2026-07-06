@@ -16,10 +16,10 @@ load_dotenv()
 from config import POLL_INTERVAL_SECONDS, SUPPLIER_ID
 from trendyolgo_client import get_new_orders
 from trendyolgo_client import get_stores
-from telegram_notifier import send_message, format_order_message
+from telegram_notifier import send_message, format_order_message, format_status_change_message
 from daily_report import send_daily_report
 from excel_report import generate_daily, generate_weekly, generate_monthly
-from database import upsert_order, is_notified, mark_notified, get_all_order_ids, init_db
+from database import upsert_order, is_status_notified, mark_status_notified, get_all_order_ids, init_db
 from bot_commands import process_updates
 
 TURKEY_TZ = pytz.timezone("Europe/Istanbul")
@@ -44,27 +44,44 @@ def now_str() -> str:
     return datetime.now(TURKEY_TZ).strftime("%H:%M:%S")
 
 
+# Yeni sipariş bildirimi — tam detaylı mesaj
+NEW_ORDER_STATUSES = {"Created", "Picking"}
+# Statü değişiklik bildirimi — kısa durum mesajı
+STATUS_NOTIFY_STATUSES = {"Picking", "Invoiced", "Shipped", "Delivered", "Cancelled", "UnSupplied"}
+
+
 def check_and_notify():
     """Yeni siparişleri kontrol eder, DB'ye kaydeder, bildirim gönderir."""
     orders = get_new_orders()
     new_count = 0
+
     for order in orders:
         order_id = order.get("id")
         if not order_id:
             continue
-        upsert_order(order)               # her durumda DB'ye kaydet / güncelle
-        if not is_notified(order_id):
+
+        current_status = order.get("packageStatus", "")
+        upsert_order(order)  # her durumda DB'ye kaydet / güncelle
+
+        # 1. İlk kez görülen sipariş → tam detaylı bildirim
+        if not is_status_notified(order_id, "INITIAL"):
             msg = format_order_message(order)
             if send_message(msg):
-                mark_notified(order_id)
-                print(f"[{now_str()}] ✅ Bildirim → #{order.get('orderNumber')} ({order.get('packageStatus')})")
-            else:
-                print(f"[{now_str()}] ❌ Bildirim gönderilemedi → {order_id}")
+                mark_status_notified(order_id, "INITIAL")
+                print(f"[{now_str()}] 🆕 Yeni sipariş → #{order.get('orderNumber')} ({current_status})")
             new_count += 1
 
+        # 2. Statü değişikliği → kısa durum bildirimi
+        elif current_status in STATUS_NOTIFY_STATUSES:
+            if not is_status_notified(order_id, current_status):
+                msg = format_status_change_message(order, current_status)
+                if send_message(msg):
+                    mark_status_notified(order_id, current_status)
+                    print(f"[{now_str()}] 🔄 Statü değişti → #{order.get('orderNumber')} ({current_status})")
+                new_count += 1
+
     if new_count == 0:
-        notified_count = len(get_all_order_ids())
-        print(f"[{now_str()}] 🔍 Yeni sipariş yok. (DB'de toplam: {notified_count})")
+        print(f"[{now_str()}] 🔍 Değişiklik yok. (DB'de toplam: {len(get_all_order_ids())})")
 
 
 def check_scheduled_reports():

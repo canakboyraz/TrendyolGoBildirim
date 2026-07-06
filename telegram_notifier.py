@@ -112,3 +112,48 @@ def format_order_message(order: dict) -> str:
         message += f"📝 <b>Müşteri Notu:</b> {customer_note}\n"
 
     return message
+
+
+def format_status_change_message(order: dict, new_status: str) -> str:
+    """Sipariş statüsü değişince gönderilecek kısa bildirim mesajı."""
+    order_number = order.get("orderNumber", "N/A")
+    total_price  = order.get("totalPrice", 0)
+    eta          = order.get("eta", "-")
+
+    status_map = {
+        "Picking":   ("✅", "SİPARİŞ KABUL EDİLDİ",   "Restoran siparişi kabul etti, hazırlanıyor."),
+        "Invoiced":  ("👨‍🍳", "SİPARİŞ HAZIRLANDI",     "Sipariş hazır, kurye bekleniyor."),
+        "Shipped":   ("🛵", "SİPARİŞ YOLA ÇIKTI",     "Sipariş kuryeye teslim edildi."),
+        "Delivered": ("🎉", "SİPARİŞ TESLİM EDİLDİ", "Sipariş müşteriye ulaştı."),
+        "Cancelled": ("❌", "SİPARİŞ İPTAL EDİLDİ",  "Sipariş sistem tarafından iptal edildi."),
+        "UnSupplied":("🚫", "SİPARİŞ İPTAL (RESTORAN)","Restoran siparişi iptal etti."),
+    }
+
+    emoji, title, desc = status_map.get(new_status, ("ℹ️", new_status, ""))
+
+    msg = (
+        f"{emoji} <b>{title}</b>\n"
+        f"{'━' * 28}\n"
+        f"📋 <b>Sipariş No:</b> #{order_number}\n"
+        f"💰 <b>Tutar:</b> {total_price:.2f} ₺\n"
+    )
+    if eta and eta != "-":
+        msg += f"⏱️ <b>Tahmini süre:</b> {eta}\n"
+    if desc:
+        msg += f"ℹ️ {desc}\n"
+
+    # İptal nedeni varsa ekle
+    if new_status in ("Cancelled", "UnSupplied"):
+        cancel_info = order.get("cancelInfo") or {}
+        reason_code = cancel_info.get("reasonCode")
+        reason_map  = {
+            621: "Tedarik problemi", 622: "Mağaza kapalı",
+            623: "Mağaza hazırlayamıyor", 624: "Yüksek yoğunluk",
+            625: "Kabul edilmedi", 626: "Alan dışı",
+            627: "Sipariş karışıklığı", 604: "Müşteri iptal talep etti",
+            605: "Sipariş gecikti",
+        }
+        if reason_code:
+            msg += f"📌 <b>Neden:</b> {reason_map.get(reason_code, f'Kod: {reason_code}')}\n"
+
+    return msg

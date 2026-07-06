@@ -27,27 +27,33 @@ def init_db():
     with get_conn() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS orders (
-                id              TEXT PRIMARY KEY,
-                order_number    TEXT,
-                order_code      TEXT,
-                store_id        INTEGER,
-                supplier_id     INTEGER,
-                status          TEXT,
-                total_price     REAL,
-                delivery_type   TEXT,
-                payment_type    TEXT,
-                app_name        TEXT,
-                customer_name   TEXT,
-                customer_note   TEXT,
-                is_test         INTEGER,
-                is_cancelled    INTEGER,
-                created_ts      INTEGER,
-                lines_json      TEXT,
-                raw_json        TEXT,
-                notified        INTEGER DEFAULT 0,
-                recorded_at     TEXT
+                id                TEXT PRIMARY KEY,
+                order_number      TEXT,
+                order_code        TEXT,
+                store_id          INTEGER,
+                supplier_id       INTEGER,
+                status            TEXT,
+                total_price       REAL,
+                delivery_type     TEXT,
+                payment_type      TEXT,
+                app_name          TEXT,
+                customer_name     TEXT,
+                customer_note     TEXT,
+                is_test           INTEGER,
+                is_cancelled      INTEGER,
+                created_ts        INTEGER,
+                lines_json        TEXT,
+                raw_json          TEXT,
+                notified          INTEGER DEFAULT 0,
+                notified_statuses TEXT DEFAULT '',
+                recorded_at       TEXT
             )
         """)
+        # Eski DB'lere kolon ekle (migration)
+        try:
+            conn.execute("ALTER TABLE orders ADD COLUMN notified_statuses TEXT DEFAULT ''")
+        except Exception:
+            pass  # Zaten varsa hata vermez
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_orders_created
             ON orders(created_ts)
@@ -115,6 +121,7 @@ def upsert_order(order: dict):
 
 
 def is_notified(order_id: str) -> bool:
+    """Sipariş için herhangi bir bildirim gönderildi mi?"""
     with get_conn() as conn:
         row = conn.execute(
             "SELECT notified FROM orders WHERE id = ?", (order_id,)
@@ -122,10 +129,39 @@ def is_notified(order_id: str) -> bool:
         return bool(row and row["notified"])
 
 
+def is_status_notified(order_id: str, status: str) -> bool:
+    """Bu sipariş için bu statü bildirimi daha önce gönderildi mi?"""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT notified_statuses FROM orders WHERE id = ?", (order_id,)
+        ).fetchone()
+        if not row:
+            return False
+        sent = row["notified_statuses"] or ""
+        return status in sent.split(",")
+
+
 def mark_notified(order_id: str):
+    """Siparişi genel olarak bildirildi say."""
     with get_conn() as conn:
         conn.execute(
             "UPDATE orders SET notified = 1 WHERE id = ?", (order_id,)
+        )
+        conn.commit()
+
+
+def mark_status_notified(order_id: str, status: str):
+    """Bu sipariş için bu statüyü bildirildi olarak işaretle."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT notified_statuses FROM orders WHERE id = ?", (order_id,)
+        ).fetchone()
+        existing = (row["notified_statuses"] or "") if row else ""
+        statuses = set(existing.split(",")) if existing else set()
+        statuses.add(status)
+        conn.execute(
+            "UPDATE orders SET notified = 1, notified_statuses = ? WHERE id = ?",
+            (",".join(statuses), order_id)
         )
         conn.commit()
 
