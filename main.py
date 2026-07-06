@@ -17,6 +17,7 @@ from config import POLL_INTERVAL_SECONDS, SUPPLIER_ID
 from trendyolgo_client import get_new_orders, get_stores
 from telegram_notifier import send_message, format_order_message
 from daily_report import send_daily_report
+from excel_report import generate_and_send as send_excel_report
 
 
 # Daha önce bildirimi gönderilmiş sipariş ID'lerini tutar
@@ -52,6 +53,7 @@ def check_daily_report():
         daily_report_sent_date = today_str
         print(f"[{now()}] 📊 Günlük rapor saati geldi, gönderiliyor...")
         send_daily_report()
+        send_excel_report()
 
 
 def check_and_notify():
