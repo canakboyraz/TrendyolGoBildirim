@@ -1,157 +1,162 @@
 """
 Trendyol Go Sipariş Bildirim Servisi
 =====================================
-Her 30 saniyede bir yeni siparişleri kontrol eder,
-yeni sipariş gelince Telegram üzerinden bildirim gönderir.
+- Her 30 saniyede yeni sipariş kontrolü + Telegram bildirimi
+- Telegram bot komutları (/durum, /rapor, /excel, /ac, /kapat ...)
+- Her gece 23:45 → günlük özet mesajı + Excel (dün ile karşılaştırmalı)
+- Her Pazartesi 08:00 → haftalık Excel
+- Ayın 1'i 08:00 → aylık Excel
 """
-
-import time
-import signal
-import sys
+import time, signal, sys
 from datetime import datetime
 import pytz
 from dotenv import load_dotenv
-load_dotenv()  # .env dosyasını yükle (local geliştirme için)
+load_dotenv()
 
 from config import POLL_INTERVAL_SECONDS, SUPPLIER_ID
-from trendyolgo_client import get_new_orders, get_stores
+from trendyolgo_client import get_new_orders
+from trendyolgo_client import get_stores
 from telegram_notifier import send_message, format_order_message
 from daily_report import send_daily_report
-from excel_report import generate_and_send as send_excel_report
+from excel_report import generate_daily, generate_weekly, generate_monthly
+from database import upsert_order, is_notified, mark_notified, get_all_order_ids, init_db
+from bot_commands import process_updates
 
+TURKEY_TZ = pytz.timezone("Europe/Istanbul")
 
-# Daha önce bildirimi gönderilmiş sipariş ID'lerini tutar
-seen_order_ids: set = set()
-
-# Servis çalışma durumu
 running = True
+DAILY_H, DAILY_M     = 23, 45   # Günlük rapor saati
+WEEKLY_H, WEEKLY_M   =  8,  0   # Haftalık rapor saati (Pazartesi)
+MONTHLY_H, MONTHLY_M =  8,  0   # Aylık rapor saati (Ayın 1'i)
 
-# Günlük raporun bugün gönderilip gönderilmediğini takip eder
-daily_report_sent_date: str = ""
-DAILY_REPORT_HOUR = 23
-DAILY_REPORT_MINUTE = 45
+sent_today:   str = ""
+sent_weekly:  str = ""
+sent_monthly: str = ""
 
 
 def handle_shutdown(signum, frame):
-    """CTRL+C veya kill sinyalinde temiz kapanış."""
     global running
     print("\n[BİLGİ] Servis durduruluyor...")
     running = False
 
 
-def check_daily_report():
-    """Her gün 23:45'te bir kez günlük rapor gönderir (Türkiye saati)."""
-    global daily_report_sent_date
-    now_dt = datetime.now(TURKEY_TZ)
-    today_str = now_dt.strftime("%Y-%m-%d")
-
-    if (
-        now_dt.hour == DAILY_REPORT_HOUR
-        and now_dt.minute == DAILY_REPORT_MINUTE
-        and daily_report_sent_date != today_str
-    ):
-        daily_report_sent_date = today_str
-        print(f"[{now()}] 📊 Günlük rapor saati geldi, gönderiliyor...")
-        send_daily_report()
-        send_excel_report()
+def now_str() -> str:
+    return datetime.now(TURKEY_TZ).strftime("%H:%M:%S")
 
 
 def check_and_notify():
-    """Yeni siparişleri kontrol eder ve bildirim gönderir."""
+    """Yeni siparişleri kontrol eder, DB'ye kaydeder, bildirim gönderir."""
     orders = get_new_orders()
-
     new_count = 0
     for order in orders:
         order_id = order.get("id")
         if not order_id:
             continue
-
-        # Her sipariş ID'si için yalnızca bir kez bildirim gönder
-        if order_id not in seen_order_ids:
-            seen_order_ids.add(order_id)
-            message = format_order_message(order)
-            success = send_message(message)
-            if success:
-                order_number = order.get("orderNumber", "N/A")
-                status = order.get("packageStatus", "?")
-                print(f"[{now()}] ✅ Bildirim gönderildi → Sipariş #{order_number} (Statü: {status})")
+        upsert_order(order)               # her durumda DB'ye kaydet / güncelle
+        if not is_notified(order_id):
+            msg = format_order_message(order)
+            if send_message(msg):
+                mark_notified(order_id)
+                print(f"[{now_str()}] ✅ Bildirim → #{order.get('orderNumber')} ({order.get('packageStatus')})")
             else:
-                print(f"[{now()}] ❌ Bildirim gönderilemedi → Sipariş ID: {order_id}")
+                print(f"[{now_str()}] ❌ Bildirim gönderilemedi → {order_id}")
             new_count += 1
 
     if new_count == 0:
-        print(f"[{now()}] 🔍 Yeni sipariş yok. (Toplam takip edilen: {len(seen_order_ids)})")
+        notified_count = len(get_all_order_ids())
+        print(f"[{now_str()}] 🔍 Yeni sipariş yok. (DB'de toplam: {notified_count})")
 
 
-TURKEY_TZ = pytz.timezone("Europe/Istanbul")
+def check_scheduled_reports():
+    """Zamanlı raporları kontrol eder."""
+    global sent_today, sent_weekly, sent_monthly
+    now = datetime.now(TURKEY_TZ)
+    today = now.strftime("%Y-%m-%d")
 
-def now() -> str:
-    return datetime.now(TURKEY_TZ).strftime("%H:%M:%S")
+    # Günlük — her gece 23:45
+    if now.hour == DAILY_H and now.minute == DAILY_M and sent_today != today:
+        sent_today = today
+        print(f"[{now_str()}] 📊 Günlük rapor gönderiliyor...")
+        send_daily_report()
+        generate_daily()
+
+    # Haftalık — her Pazartesi 08:00
+    week_key = f"{now.isocalendar()[1]}-{now.year}"
+    if now.weekday() == 0 and now.hour == WEEKLY_H and now.minute == WEEKLY_M and sent_weekly != week_key:
+        sent_weekly = week_key
+        print(f"[{now_str()}] 📅 Haftalık rapor gönderiliyor...")
+        generate_weekly()
+
+    # Aylık — ayın 1'i 08:00
+    month_key = now.strftime("%Y-%m")
+    if now.day == 1 and now.hour == MONTHLY_H and now.minute == MONTHLY_M and sent_monthly != month_key:
+        sent_monthly = month_key
+        print(f"[{now_str()}] 🗓️ Aylık rapor gönderiliyor...")
+        generate_monthly()
 
 
 def startup_check() -> bool:
-    """Başlangıçta API ve Telegram bağlantısını test eder."""
     print("=" * 50)
     print("  Trendyol Go Sipariş Bildirim Servisi")
     print("=" * 50)
-    print(f"  Supplier ID : {SUPPLIER_ID}")
-    print(f"  Kontrol aralığı: her {POLL_INTERVAL_SECONDS} saniye")
+    print(f"  Supplier ID      : {SUPPLIER_ID}")
+    print(f"  Kontrol aralığı  : her {POLL_INTERVAL_SECONDS} saniye")
+    print(f"  Günlük rapor     : 23:45 (TR)")
+    print(f"  Haftalık rapor   : Pazartesi 08:00 (TR)")
+    print(f"  Aylık rapor      : Ayın 1'i 08:00 (TR)")
     print("=" * 50)
 
-    # API bağlantı testi
-    print("\n[BAŞLANGIÇ] Trendyol Go API bağlantısı test ediliyor...")
+    print("\n[BAŞLANGIÇ] DB başlatılıyor...")
+    init_db()
+    print("[BAŞLANGIÇ] ✅ Veritabanı hazır.")
+
+    print("[BAŞLANGIÇ] Trendyol Go API test ediliyor...")
     stores = get_stores()
     if stores is not None:
-        print(f"[BAŞLANGIÇ] ✅ API bağlantısı başarılı. {len(stores)} restoran bulundu.")
-        for store in stores:
-            print(f"           → {store.get('name', '?')} (ID: {store.get('id', '?')}) — {store.get('workingStatus', '?')}")
+        print(f"[BAŞLANGIÇ] ✅ API bağlantısı başarılı. {len(stores)} restoran.")
+        for s in stores:
+            print(f"           → {s.get('name')} (ID:{s.get('id')}) — {s.get('workingStatus')}")
     else:
-        print("[BAŞLANGIÇ] ⚠️  API bağlantısı test edilemedi.")
+        print("[BAŞLANGIÇ] ⚠️  API test edilemedi.")
 
-    # Telegram testi
-    print("\n[BAŞLANGIÇ] Telegram bağlantısı test ediliyor...")
-    test_msg = (
+    print("[BAŞLANGIÇ] Telegram test ediliyor...")
+    msg = (
         "✅ <b>Trendyol Go Bildirim Servisi Başladı!</b>\n\n"
         f"🏪 Supplier ID: <code>{SUPPLIER_ID}</code>\n"
-        f"⏱️ Kontrol aralığı: her <b>{POLL_INTERVAL_SECONDS} saniye</b>\n\n"
-        "Yeni sipariş geldiğinde buradan bildirim alacaksınız. 🚀"
+        f"⏱️ Kontrol: her <b>{POLL_INTERVAL_SECONDS} sn</b>\n\n"
+        "Komutlar için /yardim yaz. 🚀"
     )
-    if send_message(test_msg):
-        print("[BAŞLANGIÇ] ✅ Telegram bağlantısı başarılı. Test mesajı gönderildi.")
+    if send_message(msg):
+        print("[BAŞLANGIÇ] ✅ Telegram hazır.")
         return True
     else:
-        print("[BAŞLANGIÇ] ❌ Telegram mesajı gönderilemedi. Token ve Chat ID'yi kontrol edin.")
+        print("[BAŞLANGIÇ] ❌ Telegram mesajı gönderilemedi.")
         return False
 
 
 def main():
     global running
-
-    # Temiz kapanış için sinyal dinleyicileri
-    signal.signal(signal.SIGINT, handle_shutdown)
+    signal.signal(signal.SIGINT,  handle_shutdown)
     signal.signal(signal.SIGTERM, handle_shutdown)
 
-    # Başlangıç kontrolü
     if not startup_check():
         sys.exit(1)
 
-    print(f"\n[{now()}] Servis çalışıyor. Siparişler izleniyor...\n")
+    print(f"\n[{now_str()}] Servis çalışıyor...\n")
 
-    # Ana döngü
     while running:
         try:
             check_and_notify()
-            check_daily_report()
+            check_scheduled_reports()
+            process_updates()          # Telegram komutlarını işle
         except Exception as e:
-            print(f"[{now()}] ❌ Beklenmeyen hata: {e}")
+            print(f"[{now_str()}] ❌ Beklenmeyen hata: {e}")
 
-        # Bekleme — interrupt'a duyarlı
         for _ in range(POLL_INTERVAL_SECONDS):
-            if not running:
-                break
+            if not running: break
             time.sleep(1)
 
-    print(f"[{now()}] Servis durduruldu.")
+    print(f"[{now_str()}] Servis durduruldu.")
 
 
 if __name__ == "__main__":
