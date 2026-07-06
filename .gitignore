@@ -1,6 +1,5 @@
 # Gizli bilgiler — asla GitHub'a gitmesin
 .env
-config.py
 
 # Python
 __pycache__/
